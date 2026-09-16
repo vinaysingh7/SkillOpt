@@ -1662,6 +1662,33 @@ def resolve_copilot_path(explicit: str = "") -> str:
     return found or "copilot"
 
 
+def resolve_copilot_argv(explicit: str = "") -> List[str]:
+    """Resolve an argv prefix that launches the Copilot CLI *directly*.
+
+    On Windows ``shutil.which("copilot")`` finds ``copilot.CMD``, an npm batch
+    shim rather than the real entry point. Launching a ``.cmd`` makes
+    CreateProcess route the call through ``cmd.exe``, and cmd's command-line
+    parsing stops at the first newline. Because every prompt here embeds a whole
+    ``SKILL.md``, the ``-p`` value is truncated to nothing *and every flag after
+    it is dropped* — including ``--output-format json``. The CLI then answers in
+    plain text ("No task or request was included in your message"), the JSONL
+    parser finds no events and returns "", and the caller sees an empty response
+    with returncode 0 and clean stderr. That scores as a legitimate 0.0 and the
+    gate rejects on a tie at zero, which is indistinguishable from a real
+    verdict. Resolve the Node entry point so cmd.exe is never involved.
+    """
+    path = resolve_copilot_path(explicit)
+    if os.name != "nt" or not path.lower().endswith((".cmd", ".bat", ".ps1")):
+        return [path]
+    loader = os.path.join(
+        os.path.dirname(path), "node_modules", "@github", "copilot", "npm-loader.js"
+    )
+    node = shutil.which("node")
+    if node and os.path.isfile(loader):
+        return [node, loader]
+    return [path]
+
+
 def resolve_cursor_path(explicit: str = "") -> str:
     """Find the Cursor Agent CLI (``cursor-agent``)."""
     if explicit:
@@ -1714,6 +1741,7 @@ class CopilotCliBackend(CliBackend):
         super().__init__(model=model or os.environ.get("SKILLOPT_SLEEP_COPILOT_MODEL", ""),
                          timeout=timeout)
         self.copilot_path = resolve_copilot_path(copilot_path)
+        self.copilot_argv = resolve_copilot_argv(copilot_path)
         self.full_env = os.environ.get("SKILLOPT_SLEEP_COPILOT_FULL_ENV", "") == "1"
         # Stable isolated home so first-run setup is cached across calls.
         if self.full_env:
@@ -1730,7 +1758,7 @@ class CopilotCliBackend(CliBackend):
     def _call(self, prompt: str, *, max_tokens: int = 1024) -> str:
         clean_cwd = tempfile.mkdtemp(prefix="skillopt_sleep_copilot_")
         cmd = [
-            self.copilot_path, "-p", prompt,
+            *self.copilot_argv, "-p", prompt,
             "--output-format", "json",
             "--stream", "off",
             "--no-color",
@@ -1873,7 +1901,7 @@ class CopilotCliBackend(CliBackend):
                 "Return ONLY the final answer text."
             )
             cmd = [
-                self.copilot_path, "-p", prompt,
+                *self.copilot_argv, "-p", prompt,
                 "--output-format", "json",
                 "--stream", "off",
                 "--no-color",
