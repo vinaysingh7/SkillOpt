@@ -21,6 +21,7 @@ from typing import Any, List, Optional
 from urllib.request import pathname2url
 
 from skillopt_sleep.harvest import (
+    FEEDBACK_WINDOW_CHARS,
     _detect_feedback,
     _is_agent_session,
     _is_headless_replay,
@@ -171,16 +172,24 @@ def harvest_copilot_cli(
             feedback: List[str] = []
             n_user = 0
             n_asst = 0
+            # Feedback is only meaningful about an answer that already exists, so
+            # the first user turn cannot be judging anything. Scanning only the
+            # opening of a REPLY avoids attributing unrelated prose -- "I fixed
+            # the config and redeployed" otherwise registers as pos:fixed.
+            seen_answer = False
             for turn in turns:
                 user_text = _clip(turn["user_message"])
                 if user_text:
                     n_user += 1
-                    feedback.extend(_detect_feedback(user_text))
+                    if seen_answer:
+                        feedback.extend(_detect_feedback(
+                            user_text, window=FEEDBACK_WINDOW_CHARS))
                     if not _is_meta_prompt(user_text) and len(prompts) < _MAX_PROMPTS_PER_SESSION:
                         prompts.append(user_text)
                 asst_text = _clip(turn["assistant_response"])
                 if asst_text:
                     n_asst += 1
+                    seen_answer = True
                     # Keep only the last few answers (rolling window) so a long
                     # session does not balloon the digest.
                     finals.append(asst_text)

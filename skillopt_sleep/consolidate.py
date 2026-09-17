@@ -189,6 +189,7 @@ def consolidate(
     gate_no_regression: bool = False,
     gate_min_margin: float = 0.0,
     gate_bootstrap: int = 0,
+    gate_ablate_edits: bool = False,
     gate_mode: str = "on",       # "on" (hard/soft per gate_metric) | "off" (greedy)
     rollouts_k: int = 1,         # >1 => multi-rollout contrastive reflection
     evolve_skill: bool = True,
@@ -307,12 +308,76 @@ def consolidate(
                    task_deltas=task_deltas,
                    n_edits=len(applied))
         if improved:
+            if gate_ablate_edits and len(applied) > 1:
+                applied, ablated_doc, cand_score, pairs = _ablate_edits(
+                    doc, applied, which, cand_score, pairs,
+                )
+                if ablated_doc is not None:
+                    new_doc = ablated_doc
             base_score = cand_score
             current_pairs = pairs
             all_applied.extend(applied)
             return new_doc
         all_rejected.extend(applied)
         return doc
+
+    def _ablate_edits(doc, applied, which, bundle_score, bundle_pairs):
+        """Drop edits that contribute nothing, by leave-one-out re-scoring.
+
+        The gate scores a BUNDLE. A measured run accepted four edits together
+        where two were good (restoring documented output requirements the agent
+        had been dropping) and two were not: one hardcoded a literal lifted from
+        a single training task, telling the skill to emit that exact term for
+        every future request; the other raised the score by instructing the agent
+        to infer a section the repository requires a human to supply. A rising
+        mean carried all four.
+
+        Removing an edit and re-scoring says whether it earns its place. An edit
+        whose absence costs nothing is dead weight at best and, as above,
+        sometimes an overfit to one training example.
+
+        Cost is one extra replay of the validation set per edit, which is why
+        this is opt-in.
+
+        What this CANNOT do: judge policy. The edit that infers a required
+        section genuinely improves the score, so ablation keeps it. Only a human
+        reading the staged diff catches "this contradicts a rule we hold
+        deliberately" -- which is the argument for reviewing a proposal rather
+        than adopting automatically.
+        """
+        kept = list(applied)
+        dropped: List[EditRecord] = []
+        best_doc, best_score, best_pairs = None, bundle_score, bundle_pairs
+        for edit in list(applied):
+            trial_set = [e for e in kept if e is not edit]
+            if not trial_set:
+                continue
+            trial_doc, trial_applied, _unmatched = apply_edits_detailed(doc, trial_set)
+            if not trial_applied:
+                continue
+            t_skill = trial_doc if which == "skill" else cand_skill
+            t_memory = trial_doc if which == "memory" else cand_memory
+            evlog.set_phase(backend, f"gate_ablate:{which}")
+            wo_pairs = replay_batch(backend, val_tasks, t_skill, t_memory)
+            wo_h, wo_s = aggregate_scores(wo_pairs)
+            wo_score = select_gate_score(wo_h, wo_s, gate_metric, gate_mixed_weight)
+            # Strictly-not-worse without it: the edit is not carrying the gain.
+            redundant = wo_score >= best_score - 1e-9
+            if ev is not None:
+                ev.log("gate", "ablation", target=which,
+                       content=edit.content[:200], op=edit.op,
+                       score_with=_finite_score(best_score),
+                       score_without=_finite_score(wo_score),
+                       verdict="dropped" if redundant else "kept")
+            if redundant:
+                kept = trial_set
+                dropped.append(edit)
+                best_doc, best_score, best_pairs = trial_doc, wo_score, wo_pairs
+        if not dropped:
+            return applied, None, bundle_score, bundle_pairs
+        all_rejected.extend(dropped)
+        final_doc, _final_applied, _u = apply_edits_detailed(doc, kept)
+        return kept, final_doc, best_score, best_pairs
 
     if evolve_skill:
         if rollouts_k > 1:

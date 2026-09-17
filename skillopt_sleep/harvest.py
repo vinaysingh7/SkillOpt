@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -114,16 +115,62 @@ def _skill_names_from_content(content: Any) -> List[str]:
     return names
 
 
-def _detect_feedback(text: str) -> List[str]:
-    low = text.lower()
+_FIRST_PERSON_CLAIM = re.compile(
+    r"\b(?:i|we)\s+(?:just\s+|already\s+|manually\s+|myself\s+)?(?:have\s+)?$",
+    re.IGNORECASE,
+)
+
+
+def _detect_feedback(text: str, *, window: int = 0) -> List[str]:
+    """Phrases in ``text`` suggesting the user judged the previous answer.
+
+    ``window`` limits the scan to the opening N characters. Default 0 keeps the
+    whole-text behaviour for callers that have no turn structure.
+
+    Scanning a whole prompt attributes feedback that has nothing to do with the
+    agent: a substring match fires ``pos:fixed`` on "I fixed the config and
+    redeployed", and ``neg:wrong`` on "the wrong partition count is the bug we
+    are chasing". Neither is a judgement of the assistant. A real correction
+    leads -- "no, that's wrong", "still broken" -- so restricting the scan to the
+    opening of a reply that FOLLOWS an answer is a better proxy than presence
+    anywhere in a long technical prompt.
+
+    A first-person claim is also excluded: "I fixed it" and "we reverted that"
+    describe what the USER did. Only the agent's work is being judged here, so a
+    phrase directly preceded by "I"/"we" is not feedback.
+
+    This narrows the signal; it does not make it exact. "the wrong partition
+    count" still registers when it leads, because distinguishing a fault report
+    from a complaint needs either an explicit signal from the client or a model
+    call, and neither is available here. Treat these tags as a hint, never as
+    ground truth -- in particular, do not derive a task's ``outcome`` from them
+    alone.
+    """
+    scanned = text[:window] if window > 0 else text
+    low = scanned.lower()
+
+    def _fires(phrase: str) -> bool:
+        start = low.find(phrase)
+        while start != -1:
+            if not _FIRST_PERSON_CLAIM.search(low[:start]):
+                return True
+            start = low.find(phrase, start + 1)
+        return False
+
     sig: List[str] = []
     for ph in _NEGATIVE_FEEDBACK:
-        if ph in low:
+        if _fires(ph):
             sig.append("neg:" + ph)
     for ph in _POSITIVE_FEEDBACK:
-        if ph in low:
+        if _fires(ph):
             sig.append("pos:" + ph)
     return sig
+
+
+# Characters of a user turn scanned for feedback when turn order is known. A
+# correction leads; two or three sentences is enough to catch it without
+# sweeping up unrelated prose from a long prompt.
+FEEDBACK_WINDOW_CHARS = 240
 
 
 def _is_meta_prompt(text: str) -> bool:

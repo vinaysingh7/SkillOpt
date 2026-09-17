@@ -79,6 +79,14 @@ DEFAULTS: Dict[str, Any] = {
     # candidate must ALSO clear `gate_min_margin` at the 5th percentile, so an
     # improvement carried by one or two tasks out of many is rejected. 0 = off.
     "gate_bootstrap": 0,
+    # Leave-one-out re-scoring of each accepted edit. The gate scores a BUNDLE:
+    # an observed run accepted four edits together where two restored documented
+    # requirements and two did not -- one hardcoded a literal from a single
+    # training task. Costs one extra validation replay PER EDIT, so it is off by
+    # default. It measures score contribution, not policy: an edit that improves
+    # the score by removing a guardrail is kept, and only human review catches
+    # that.
+    "gate_ablate_edits": False,
     "replay_mode": "mock",        # report label; fresh-worktree replay is not implemented
     # ── dream + recall (opt-in; defaults reproduce the prior single-shot loop) ─
     "dream_rollouts": 1,          # >1 => multi-rollout contrastive reflection per task
