@@ -87,6 +87,14 @@ DEFAULTS: Dict[str, Any] = {
     # the score by removing a guardrail is kept, and only human review catches
     # that.
     "gate_ablate_edits": False,
+    # Times each VALIDATION task is replayed, median taken. One sample is not a
+    # measurement when the backend is nondeterministic: an identical skill and
+    # task set scored 0.538 on one run and 1.000 on the next, so a gate
+    # comparing one baseline sample against one candidate sample can both
+    # manufacture an improvement and hide one. Cost scales linearly with K.
+    # Distinct from dream_rollouts, which repeats TRAIN tasks for contrastive
+    # reflection and never touched the measurement.
+    "val_rollouts": 1,
     "replay_mode": "mock",        # report label; fresh-worktree replay is not implemented
     # ── dream + recall (opt-in; defaults reproduce the prior single-shot loop) ─
     "dream_rollouts": 1,          # >1 => multi-rollout contrastive reflection per task

@@ -190,6 +190,7 @@ def consolidate(
     gate_min_margin: float = 0.0,
     gate_bootstrap: int = 0,
     gate_ablate_edits: bool = False,
+    val_rollouts: int = 1,
     gate_mode: str = "on",       # "on" (hard/soft per gate_metric) | "off" (greedy)
     rollouts_k: int = 1,         # >1 => multi-rollout contrastive reflection
     evolve_skill: bool = True,
@@ -221,7 +222,7 @@ def consolidate(
         base_pairs: List[Tuple[TaskRecord, ReplayResult]] = []
     else:
         evlog.set_phase(backend, "baseline_val")
-        base_pairs = replay_batch(backend, val_tasks, skill, memory)
+        base_pairs = replay_batch(backend, val_tasks, skill, memory, k=val_rollouts)
         base_hard, base_soft = aggregate_scores(base_pairs)
         holdout_detail = _holdout_detail(base_pairs)
     base_score = select_gate_score(base_hard, base_soft, gate_metric, gate_mixed_weight)
@@ -275,7 +276,7 @@ def consolidate(
         trial_skill = new_doc if which == "skill" else cand_skill
         trial_memory = new_doc if which == "memory" else cand_memory
         evlog.set_phase(backend, f"gate_trial:{which}")
-        pairs = replay_batch(backend, val_tasks, trial_skill, trial_memory)
+        pairs = replay_batch(backend, val_tasks, trial_skill, trial_memory, k=val_rollouts)
         h, s = aggregate_scores(pairs)
         cand_score = select_gate_score(h, s, gate_metric, gate_mixed_weight)
         task_deltas = _task_deltas(
@@ -358,7 +359,7 @@ def consolidate(
             t_skill = trial_doc if which == "skill" else cand_skill
             t_memory = trial_doc if which == "memory" else cand_memory
             evlog.set_phase(backend, f"gate_ablate:{which}")
-            wo_pairs = replay_batch(backend, val_tasks, t_skill, t_memory)
+            wo_pairs = replay_batch(backend, val_tasks, t_skill, t_memory, k=val_rollouts)
             wo_h, wo_s = aggregate_scores(wo_pairs)
             wo_score = select_gate_score(wo_h, wo_s, gate_metric, gate_mixed_weight)
             # Strictly-not-worse without it: the edit is not carrying the gain.
@@ -451,7 +452,7 @@ def consolidate(
     else:
         # scored on the VAL slice (the gate reference)
         evlog.set_phase(backend, "final_val")
-        final_pairs = replay_batch(backend, val_tasks, cand_skill, cand_memory)
+        final_pairs = replay_batch(backend, val_tasks, cand_skill, cand_memory, k=val_rollouts)
         final_hard, final_soft = aggregate_scores(final_pairs)
         final_score = select_gate_score(final_hard, final_soft, gate_metric, gate_mixed_weight)
         base_gate_score = select_gate_score(base_hard, base_soft, gate_metric, gate_mixed_weight)
