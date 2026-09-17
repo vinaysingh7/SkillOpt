@@ -39,6 +39,17 @@ from skillopt_sleep.types import EditRecord, ReplayResult, TaskRecord
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
 
 
+class EmptyResponseError(RuntimeError):
+    """A backend produced no text, twice, for a prompt that expected an answer.
+
+    Raised rather than returned because the callers cannot tell "" apart from a
+    genuinely terrible answer: ``judge()`` scores an empty string as 0.0 and the
+    gate then compares that number like any other. A single dropped call is
+    therefore indistinguishable from a skill that performed badly, and on a small
+    holdout it decides the verdict outright.
+    """
+
+
 def skill_hash(content: str) -> str:
     import hashlib
     return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
@@ -425,9 +436,32 @@ class CliBackend(Backend):
         if isinstance(obj, dict):
             try:
                 soft = float(obj.get("score", 0.0))
-                return (1.0 if soft >= 0.8 else 0.0), soft, str(obj.get("reason", ""))[:200]
             except (ValueError, TypeError):
                 pass
+            else:
+                # When the task also carries checks, `hard` means "passed every
+                # stated requirement" -- a signal independent of the judge.
+                # Without them `hard` is only `soft` thresholded, i.e. the same
+                # opinion twice, which makes a `mixed` metric a weighted average
+                # of one number with itself.
+                #
+                # Checks on response CONTENT are gameable here, because the
+                # optimizer edits skill text prepended to the model's context
+                # and can instruct it to emit the literal. That is why
+                # `gate_metric: soft` is the safe default: the checks are
+                # recorded and visible without gating the decision. Choosing
+                # `hard` or `mixed` opts into letting them bite, which is
+                # appropriate when the checks encode a specification rather than
+                # stand in for judgement.
+                checks = (task.judge or {}).get("checks") or []
+                if checks:
+                    from skillopt_sleep.judges import score_rule_judge
+                    rule_hard, _rule_soft, rule_why = score_rule_judge(
+                        task.judge, response)
+                    return rule_hard, soft, (
+                        f"{str(obj.get('reason', ''))[:160]} | checks: {rule_why[:120]}"
+                    )
+                return (1.0 if soft >= 0.8 else 0.0), soft, str(obj.get("reason", ""))[:200]
         return 0.0, 0.0, "judge-parse-failed"
 
     def reflect(
@@ -1756,6 +1790,25 @@ class CopilotCliBackend(CliBackend):
                 self.copilot_home = ""
 
     def _call(self, prompt: str, *, max_tokens: int = 1024) -> str:
+        # An empty response must never reach the caller. `judge()` scores "" as
+        # a legitimate 0.0, so one dropped API call becomes an ordinary-looking
+        # score -- observed as `gate_trial:skill` = 0.00 with the rationale "No
+        # response was provided to evaluate against the rubric", which decided a
+        # gate verdict on a single-task holdout. The judge rated silence, not the
+        # skill. Retry once, then fail loudly: aborting a cycle is recoverable, a
+        # laundered infrastructure failure is not.
+        out = self._call_once(prompt, max_tokens=max_tokens)
+        if out.strip():
+            return out
+        out = self._call_once(prompt, max_tokens=max_tokens)
+        if out.strip():
+            return out
+        raise EmptyResponseError(
+            f"{self.name} backend returned an empty response twice "
+            f"(prompt {len(prompt)} chars). Refusing to score silence as 0.0."
+        )
+
+    def _call_once(self, prompt: str, *, max_tokens: int = 1024) -> str:
         clean_cwd = tempfile.mkdtemp(prefix="skillopt_sleep_copilot_")
         cmd = [
             *self.copilot_argv, "-p", prompt,

@@ -38,6 +38,15 @@ conventions). Skip one-off or purely exploratory requests.
 
 For each task return:
   - "intent": the reusable request, generalized (no one-off specifics)
+  - "context": the concrete material an answer NEEDS in order to be attemptable —
+     the query text, the list, the file contents, the error message, the diff.
+     Copy it verbatim from the session. This is NOT optional whenever your
+     rubric or checks refer to supplied material: a task saying "review the
+     provided query" with no query here is unanswerable, scores every answer at
+     zero, and silently poisons the run. If the material is not present in the
+     session excerpt below, either omit the task entirely or write an intent
+     that does not depend on material you cannot supply. Use "" only for tasks
+     that are genuinely self-contained.
   - "checks": a list of programmatic success checks a grader can run on a future
      answer. Prefer checks about WHAT THE ANSWER DOES over how it is formatted:
         {"op":"contains","arg":"<substring a correct answer must contain>"}

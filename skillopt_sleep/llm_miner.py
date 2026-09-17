@@ -60,11 +60,39 @@ def _digest_to_prompt(d: SessionDigest) -> str:
     })
 
 
+_SUPPLIED_MATERIAL = (
+    "the provided", "the given", "the supplied", "the attached",
+    "the pasted", "the above", "the following", "the user's list",
+    "provided query", "provided list", "provided code", "provided diff",
+)
+
+
+def _references_supplied_material(rubric: str) -> bool:
+    """True when a rubric grades material the task is expected to carry.
+
+    Such a rubric is only satisfiable if ``context_excerpt`` actually holds that
+    material. Observed failure: a rubric requiring an answer to review "the
+    provided KQL query" on a task whose context was empty -- unanswerable by
+    construction, yet it decided a gate verdict because it was the single
+    holdout task.
+    """
+    low = rubric.lower()
+    return any(phrase in low for phrase in _SUPPLIED_MATERIAL)
+
+
 def _mk_task(d: SessionDigest, obj: Dict[str, Any], idx: int) -> TaskRecord | None:
     intent = str(obj.get("intent", "")).strip()
     if len(intent) < 8:
         return None
     checks = obj.get("checks") or []
+    # The material an answer needs. Previously never populated: a mined task
+    # inherited an intent but none of the material the intent referred to, so a
+    # rubric grading "the provided query" was applied to a task carrying no
+    # query. Every candidate scored near zero and the judge contradicted itself
+    # between trials ("none was provided" vs "per the rubric a query was
+    # provided"). Observed deciding a gate verdict on a 9-task holdout.
+    context_raw = obj.get("context")
+    context = context_raw.strip() if isinstance(context_raw, str) else ""
     # A non-string rubric (e.g. a JSON null) must not become the literal "None"
     # and outrank the checks; only a real string counts as a rubric.
     rubric_raw = obj.get("rubric")
@@ -112,18 +140,39 @@ def _mk_task(d: SessionDigest, obj: Dict[str, Any], idx: int) -> TaskRecord | No
     import hashlib
     tid = "llm_" + hashlib.sha256((d.project + intent).encode()).hexdigest()[:12]
 
+    # A rubric that grades supplied material, on a task carrying none, cannot be
+    # satisfied by any answer. It does not score zero honestly -- it scores zero
+    # for BOTH arms, contributing a phantom tie that dilutes the gate. Drop it.
+    if rubric and not context and _references_supplied_material(rubric):
+        return None
+
     judge = {"kind": "rule", "checks": clean_checks}
-    # The optimizer edits skill text that is prepended to the model's context,
-    # so ANY check for a literal string in the response can be satisfied by
-    # instructing the model to emit that string -- observed twice in practice,
-    # first with section_present and then with contains. Only semantic grading
-    # resists that, so a rubric always wins when the miner supplies one.
-    # Rule judges remain for imported gbrain-style benchmarks, which carry
-    # checks but no rubric.
+    # Rubric and checks are complementary, not alternatives, so carry both.
+    #
+    # The previous behaviour returned on the rubric branch, discarding checks
+    # entirely. The reason was sound: the optimizer edits skill text that is
+    # PREPENDED to the model's context, so a check for a literal string can be
+    # satisfied by instructing the model to emit that string -- observed twice
+    # upstream, first with section_present and then with contains. Only semantic
+    # grading resists that.
+    #
+    # But discarding them also threw away the only independent signal in the
+    # reward. On the rubric path `hard` was computed as `soft >= 0.8`, i.e. a
+    # thresholded copy of the same judge call, so `mixed` weighting counted one
+    # opinion twice. Attaching the checks lets `hard` mean "passed every stated
+    # requirement" while `soft` stays semantic.
+    #
+    # Gameability is handled by which metric gates, not by throwing the data
+    # away: `gate_metric: soft` (the safe default) leaves checks as diagnostics,
+    # while `hard`/`mixed` opt in to letting them bite. See judge() in
+    # backend.py. Rule judges remain for imported gbrain-style benchmarks, which
+    # carry checks but no rubric.
     if rubric:
         return TaskRecord(
             id=tid, project=d.project, intent=intent,
+            context_excerpt=context,
             reference_kind="rubric", reference=rubric,
+            judge=judge if clean_checks else {},
             outcome="success" if satisfied else "fail",
             tags=["mined:llm"], source_sessions=[d.session_id],
             skill_hint=session_skill_hint(d),
@@ -131,6 +180,7 @@ def _mk_task(d: SessionDigest, obj: Dict[str, Any], idx: int) -> TaskRecord | No
     if clean_checks:
         return TaskRecord(
             id=tid, project=d.project, intent=intent,
+            context_excerpt=context,
             reference_kind="rule", judge=judge,
             outcome="success" if satisfied else "fail",
             tags=["mined:llm"], source_sessions=[d.session_id],
