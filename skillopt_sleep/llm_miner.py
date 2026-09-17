@@ -33,12 +33,29 @@ from skillopt_sleep.types import SessionDigest, TaskRecord
 def _digest_to_prompt(d: SessionDigest) -> str:
     # Template lives in the central prompt registry (skillopt_sleep.prompts)
     # so the dashboard can display and override it live.
-    prompts = "\n".join(f"  - {p[:240]}" for p in d.user_prompts[:6]) or "  (none)"
-    final = (d.assistant_finals[-1][:400] if d.assistant_finals else "(none)")
+    #
+    # Budget note: the harvesters already keep up to 40 user prompts and the
+    # last 5 assistant answers at 4000 chars each, but this function previously
+    # forwarded 6 prompts at 240 chars and a single 400-char answer — roughly 1%
+    # of what was collected. That starved the miner: `checks` ask for literals a
+    # correct answer must contain (`contains`, `regex`, `tool_called`), and you
+    # cannot write those having never seen an answer. Every mined task therefore
+    # came back with zero checks and a vague invented rubric, which forced
+    # scoring onto the LLM rubric judge where verbosity is the cheapest way to
+    # score. Forward materially more so grounded checks are derivable.
+    prompts = "\n".join(f"  - {p[:800]}" for p in d.user_prompts[:20]) or "  (none)"
+    finals = d.assistant_finals[-3:]
+    if finals:
+        answers = "\n\n".join(
+            f"  [answer {i + 1} of {len(finals)}]\n  {f[:1200]}"
+            for i, f in enumerate(finals)
+        )
+    else:
+        answers = "  (none)"
     return prompt_registry.render("miner", {
         "__PROJECT__": d.project or "(unknown)",
         "__PROMPTS__": prompts,
-        "__FINAL__": final,
+        "__FINAL__": answers,
         "__FEEDBACK__": ", ".join(d.feedback_signals[:6]) or "(none)",
     })
 

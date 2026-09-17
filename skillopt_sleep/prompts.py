@@ -53,10 +53,20 @@ For each task return:
         {"op":"max_chars","arg":<int>}
         {"op":"min_chars","arg":<int>}
      Only include checks you are confident a GOOD answer must satisfy.
+     DERIVE THESE FROM THE ASSISTANT ANSWERS SHOWN BELOW. Concrete identifiers
+     that appear in an answer the user accepted — service names, required
+     headings, tools that had to be invoked, identifier formats — are exactly
+     what a `contains` / `regex` / `tool_called` check should assert. Where the
+     answers give you such evidence, returning an empty checks list is a wasted
+     opportunity: a check is deterministic and cannot be satisfied by writing
+     more words, whereas a rubric can.
   - "rubric": a one-sentence description of what a GOOD answer achieves —
-     judged on substance, not on wording or layout. ALWAYS provide this. It is
-     the primary grader, because an assistant can satisfy any literal-string
-     check simply by emitting that string.
+     judged on substance, not on wording or layout. ALWAYS provide this; it is
+     the fallback grader when checks cannot capture the substance. Do not let it
+     become the ONLY grader when the answers below support concrete checks.
+     Never write a rubric that grades material not present in the task itself
+     (e.g. "reviews the provided query" when no query is included) — such a
+     rubric is unsatisfiable and scores every answer at zero.
   - "satisfied": true/false — did the user seem satisfied with the assistant's answer?
 
 Return ONLY a JSON array (possibly empty). No prose.
@@ -65,7 +75,7 @@ Return ONLY a JSON array (possibly empty). No prose.
 project: __PROJECT__
 user prompts:
 __PROMPTS__
-assistant final (last):
+recent assistant answers (most recent last):
 __FINAL__
 feedback signals: __FEEDBACK__
 """
