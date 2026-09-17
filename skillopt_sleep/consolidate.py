@@ -16,7 +16,7 @@ from skillopt_sleep.backend import Backend
 
 # Self-contained validation gate (vendored from SkillOpt; zero dependency on the
 # research package, so this open-source tool stays decoupled from the paper code).
-from skillopt_sleep.gate import evaluate_gate, select_gate_score
+from skillopt_sleep.gate import evaluate_gate, passes_margin, select_gate_score
 from skillopt_sleep.memory import apply_edits_detailed
 from skillopt_sleep.replay import aggregate_scores, replay_batch
 from skillopt_sleep.types import EditRecord, ReplayResult, TaskRecord
@@ -187,6 +187,8 @@ def consolidate(
     gate_metric: str = "mixed",
     gate_mixed_weight: float = 0.5,
     gate_no_regression: bool = False,
+    gate_min_margin: float = 0.0,
+    gate_bootstrap: int = 0,
     gate_mode: str = "on",       # "on" (hard/soft per gate_metric) | "off" (greedy)
     rollouts_k: int = 1,         # >1 => multi-rollout contrastive reflection
     evolve_skill: bool = True,
@@ -283,7 +285,11 @@ def consolidate(
             and any(row["status"] == "regressed" for row in task_deltas)
         )
         trial_base_score = base_score
-        improved = cand_score > base_score and not blocked_by_regression
+        margin_ok, margin_why = passes_margin(
+            base_score, cand_score, task_deltas,
+            min_margin=gate_min_margin, bootstrap=gate_bootstrap,
+        )
+        improved = margin_ok and not blocked_by_regression
         gate_trials.append({
             "target": which,
             "baseline_score": _finite_score(trial_base_score),
@@ -297,6 +303,7 @@ def consolidate(
                    baseline_score=trial_base_score, cand_hard=h, cand_soft=s,
                    cand_score=cand_score, accepted=improved,
                    blocked_by_regression=blocked_by_regression,
+                   margin_ok=margin_ok, margin_why=margin_why,
                    task_deltas=task_deltas,
                    n_edits=len(applied))
         if improved:
@@ -390,6 +397,10 @@ def consolidate(
             gate_no_regression
             and any(row["status"] == "regressed" for row in final_task_deltas)
         )
+        final_margin_ok, final_margin_why = passes_margin(
+            base_gate_score, final_score, final_task_deltas,
+            min_margin=gate_min_margin, bootstrap=gate_bootstrap,
+        )
         if _HAVE_REPO_GATE:
             gate = evaluate_gate(
                 candidate_skill=cand_skill,
@@ -404,17 +415,17 @@ def consolidate(
                 metric=gate_metric,
                 mixed_weight=gate_mixed_weight,
             )
-            action = gate.action
+            action = gate.action if final_margin_ok else "reject"
             accepted = (
                 bool(all_applied)
-                and final_score > base_gate_score
+                and final_margin_ok
                 and not final_blocked_by_regression
             )
         else:
-            action = "accept" if final_score > base_gate_score else "reject"
+            action = "accept" if final_margin_ok else "reject"
             accepted = (
                 bool(all_applied)
-                and final_score > base_gate_score
+                and final_margin_ok
                 and not final_blocked_by_regression
             )
         # The gate scores documents, not edit bookkeeping: when every proposed
@@ -471,6 +482,9 @@ def consolidate(
                blocked_by_regression=(
                    final_blocked_by_regression if not gate_off else False
                ),
+               margin_ok=(final_margin_ok if not gate_off else True),
+               margin_why=(final_margin_why if not gate_off else ""),
+               min_margin=gate_min_margin, bootstrap=gate_bootstrap,
                task_deltas=(final_task_deltas if not gate_off else []),
                formula=formula, n_applied=len(all_applied),
                n_rejected=len(all_rejected),

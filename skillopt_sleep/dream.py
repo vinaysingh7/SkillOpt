@@ -130,6 +130,8 @@ def dream_consolidate(
     gate_metric: str = "mixed",
     gate_mixed_weight: float = 0.5,
     gate_no_regression: bool = False,
+    gate_min_margin: float = 0.0,
+    gate_bootstrap: int = 0,
     gate_mode: str = "on",
     evolve_skill: bool = True,
     evolve_memory: bool = True,
@@ -163,6 +165,7 @@ def dream_consolidate(
         edit_budget=edit_budget, gate_metric=gate_metric,
         gate_mixed_weight=gate_mixed_weight,
         gate_no_regression=gate_no_regression, gate_mode=gate_mode,
+        gate_min_margin=gate_min_margin, gate_bootstrap=gate_bootstrap,
         rollouts_k=dream_rollouts, evolve_skill=evolve_skill,
         evolve_memory=evolve_memory, night=night,
     )

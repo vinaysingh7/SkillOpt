@@ -66,6 +66,19 @@ DEFAULTS: Dict[str, Any] = {
     "gate_metric": "mixed",       # hard | soft | mixed (mixed best for tiny holdouts)
     "gate_mixed_weight": 0.5,
     "gate_no_regression": False,    # reject any candidate that lowers a val-task score
+    # Minimum mean improvement required to accept. The bare `cand > base`
+    # comparison accepts any epsilon: an observed run accepted on +0.0056, a
+    # total delta of 0.05 across nine tasks -- one task moving a single notch on
+    # a judge whose smallest observed step was 0.05. On the same run the
+    # candidate destroyed the only task the baseline answered perfectly.
+    # 0.0 preserves the historical behaviour; set it above the metric's
+    # granularity (roughly one judge notch divided by the holdout size) to stop
+    # reading noise as progress.
+    "gate_min_margin": 0.0,
+    # Resamples for a paired bootstrap over the per-task deltas. When > 0 the
+    # candidate must ALSO clear `gate_min_margin` at the 5th percentile, so an
+    # improvement carried by one or two tasks out of many is rejected. 0 = off.
+    "gate_bootstrap": 0,
     "replay_mode": "mock",        # report label; fresh-worktree replay is not implemented
     # ── dream + recall (opt-in; defaults reproduce the prior single-shot loop) ─
     "dream_rollouts": 1,          # >1 => multi-rollout contrastive reflection per task
