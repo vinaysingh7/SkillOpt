@@ -842,7 +842,7 @@ class ClaudeCliBackend(CliBackend):
         try:
             for tname in (tools or ["search"]):
                 shim = os.path.join(work, tname)
-                with open(shim, "w") as f:
+                with open(shim, "w", encoding="utf-8") as f:
                     f.write(
                         "#!/usr/bin/env bash\n"
                         f'echo "{tname}" >> "{calllog}"\n'
@@ -893,7 +893,7 @@ class ClaudeCliBackend(CliBackend):
             self._tokens += len(prompt) // 4 + len(resp) // 4
             called: List[str] = []
             if os.path.exists(calllog):
-                with open(calllog) as f:
+                with open(calllog, encoding="utf-8") as f:
                     logged = {ln.strip() for ln in f if ln.strip()}
                 called = [t for t in (tools or ["search"]) if t in logged]
             return resp, called
@@ -1591,7 +1591,7 @@ class CodexCliBackend(CliBackend):
             for tname in tool_names:
                 if is_windows:
                     shim = os.path.join(work, f"{tname}.cmd")
-                    with open(shim, "w") as f:
+                    with open(shim, "w", encoding="utf-8") as f:
                         f.write(
                             "@echo off\n"
                             f'echo %~n0>>"{calllog}"\n'
@@ -1599,7 +1599,7 @@ class CodexCliBackend(CliBackend):
                         )
                 else:
                     shim = os.path.join(work, tname)
-                    with open(shim, "w") as f:
+                    with open(shim, "w", encoding="utf-8") as f:
                         f.write(
                             "#!/usr/bin/env bash\n"
                             f'echo "{tname}" >> "{calllog}"\n'
@@ -1674,7 +1674,7 @@ class CodexCliBackend(CliBackend):
             self._tokens += len(prompt) // 4 + len(resp) // 4
             called: List[str] = []
             if os.path.exists(calllog):
-                with open(calllog) as f:
+                with open(calllog, encoding="utf-8") as f:
                     logged = {ln.strip() for ln in f if ln.strip()}
                 called = [t for t in (tools or ["search"]) if t in logged]
             return resp, called
@@ -1907,7 +1907,7 @@ class CopilotCliBackend(CliBackend):
             for tname in tool_names:
                 if is_windows:
                     shim = os.path.join(work, f"{tname}.cmd")
-                    with open(shim, "w") as f:
+                    with open(shim, "w", encoding="utf-8") as f:
                         # `%~n0` is the script's own base name (the tool name);
                         # writing it keeps the calllog line == tool name so the
                         # honest-detection match below works unchanged.
@@ -1918,7 +1918,7 @@ class CopilotCliBackend(CliBackend):
                         )
                 else:
                     shim = os.path.join(work, tname)
-                    with open(shim, "w") as f:
+                    with open(shim, "w", encoding="utf-8") as f:
                         f.write(
                             "#!/usr/bin/env bash\n"
                             f'echo "{tname}" >> "{calllog}"\n'
@@ -1987,7 +1987,7 @@ class CopilotCliBackend(CliBackend):
             self._tokens += len(prompt) // 4 + len(resp) // 4
             called: List[str] = []
             if os.path.exists(calllog):
-                with open(calllog) as f:
+                with open(calllog, encoding="utf-8") as f:
                     logged = {ln.strip() for ln in f if ln.strip()}
                 called = [t for t in tool_names if t in logged]
             return resp, called

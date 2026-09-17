@@ -233,11 +233,11 @@ def _load_file(path: str) -> Dict[str, Any]:
     if path.endswith((".yaml", ".yml")):
         try:
             import yaml  # optional
-            with open(path) as f:
+            with open(path, encoding="utf-8") as f:
                 return yaml.safe_load(f) or {}
         except Exception:
             return {}
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
