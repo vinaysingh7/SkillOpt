@@ -45,6 +45,8 @@ def get_backend(
     cursor_path="",
     opencode_path="",
     opencode_tool_replay=False,
+    copilot_replay_profile="",
+    copilot_replay_tools=None,
     azure_endpoint="",
     project_dir="",
 ):
@@ -59,6 +61,8 @@ def get_backend(
         cursor_path=cursor_path,
         opencode_path=opencode_path,
         opencode_tool_replay=opencode_tool_replay,
+        copilot_replay_profile=copilot_replay_profile,
+        copilot_replay_tools=copilot_replay_tools,
         azure_endpoint=azure_endpoint,
         project_dir=project_dir,
     )

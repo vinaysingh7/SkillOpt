@@ -22,18 +22,18 @@ These tests capture the constructed argv without spawning the CLI.
 """
 from __future__ import annotations
 
+import subprocess
+
+import pytest
+
 from skillopt_sleep import backend as backend_mod
 from skillopt_sleep.backend import CopilotCliBackend
 
 
-def _make_backend() -> CopilotCliBackend:
-    b = CopilotCliBackend.__new__(CopilotCliBackend)
-    b.copilot_path = "copilot"
-    b.full_env = False
-    b.model = ""
-    b.copilot_home = ""
-    b.timeout = 10
-    return b
+@pytest.fixture(autouse=True)
+def isolated_legacy_environment(monkeypatch, tmp_path):
+    monkeypatch.delenv("SKILLOPT_SLEEP_COPILOT_FULL_ENV", raising=False)
+    monkeypatch.setenv("SKILLOPT_SLEEP_COPILOT_HOME", str(tmp_path / "home"))
 
 
 def _capture_argv(monkeypatch) -> list[str]:
@@ -41,10 +41,12 @@ def _capture_argv(monkeypatch) -> list[str]:
 
     def fake_run(cmd, *args, **kwargs):  # noqa: ANN001
         captured["cmd"] = cmd
-        raise RuntimeError("stop before spawn")
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout='{"type":"assistant.message","data":{"content":"answer"}}', stderr="",
+        )
 
     monkeypatch.setattr(backend_mod.subprocess, "run", fake_run)
-    _make_backend()._call("hello")
+    CopilotCliBackend(copilot_path="copilot", timeout=10)._call("hello")
     return captured["cmd"]
 
 

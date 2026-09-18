@@ -20,8 +20,9 @@ from dataclasses import dataclass
 from typing import List, Optional, Sequence
 
 from skillopt_sleep import evidence
-from skillopt_sleep.backend import Backend, CursorBackendError, build_backend
+from skillopt_sleep.backend import Backend, CopilotCliBackend, CursorBackendError, build_backend
 from skillopt_sleep.config import DEFAULTS, SleepConfig, load_config
+from skillopt_sleep.copilot_replay import CopilotReplayError, resolve_replay_profile
 from skillopt_sleep.dream import dream_consolidate
 from skillopt_sleep.evidence import EvidenceLog
 from skillopt_sleep.harvest_sources import harvest_for_config
@@ -111,6 +112,8 @@ def _make_model_key(cfg: SleepConfig) -> str:
             cursor_path=cfg.get("cursor_path", ""),
             opencode_path=cfg.get("opencode_path", ""),
             opencode_tool_replay=cfg.get("opencode_tool_replay", False),
+            copilot_replay_profile=cfg.get("copilot_replay_profile", ""),
+            copilot_replay_tools=cfg.get("copilot_replay_tools"),
             azure_endpoint=cfg.get("azure_endpoint", ""),
             project_dir=cfg.get("invoked_project", "") or os.getcwd(),
         )
@@ -646,6 +649,26 @@ def run_sleep_cycle(
     state = SleepState.load(cfg.state_path)
     project = _project_paths(cfg)
 
+    if backend is not None:
+        expected_profile = resolve_replay_profile(
+            cfg.get("copilot_replay_profile", ""), cfg.get("copilot_replay_tools"),
+            project_dir=project,
+        )
+        if expected_profile is not None:
+            delegates = [getattr(backend, "target", backend)]
+            optimizer = getattr(backend, "optimizer", None)
+            if isinstance(optimizer, CopilotCliBackend):
+                delegates.append(optimizer)
+            if any(
+                not isinstance(delegate, CopilotCliBackend)
+                or delegate.replay_profile != expected_profile
+                for delegate in delegates
+            ):
+                raise CopilotReplayError(
+                    "The supplied backend must match copilot_replay_profile/tools for the target "
+                    "and any Copilot optimizer; construct it with build_backend using those settings."
+                )
+
     backend = backend or build_backend(
         backend=cfg.get("backend", "mock"),
         model=cfg.get("model", ""),
@@ -658,6 +681,8 @@ def run_sleep_cycle(
         cursor_path=cfg.get("cursor_path", ""),
         opencode_path=cfg.get("opencode_path", ""),
         opencode_tool_replay=cfg.get("opencode_tool_replay", False),
+        copilot_replay_profile=cfg.get("copilot_replay_profile", ""),
+        copilot_replay_tools=cfg.get("copilot_replay_tools"),
         azure_endpoint=cfg.get("azure_endpoint", ""),
         preferences=cfg.get("preferences", ""),
         project_dir=project,
@@ -701,6 +726,8 @@ def run_sleep_cycle(
         cycle_config["opencode_tool_replay"] = (
             cfg.get("opencode_tool_replay", False) is True
         )
+        cycle_config["copilot_replay_profile_enabled"] = bool(cfg.get("copilot_replay_profile"))
+        cycle_config["copilot_replay_tools"] = cfg.get("copilot_replay_tools", [])
         ev.log("cycle", "start", night=night, project=project,
                backend=backend.name, model=cfg.get("model", ""),
                config=cycle_config)
@@ -807,7 +834,7 @@ def run_sleep_cycle(
                 target_skill_text=raw_skill if target_filter else "",
                 target_skill_path=live_skill_path if target_filter else "",
             )
-        except CursorBackendError:
+        except (CursorBackendError, CopilotReplayError):
             _discard_unstaged_evidence(staging_dir_pre)
             raise
         _progress(cfg, f"mine done: tasks={len(tasks)}")
@@ -872,7 +899,7 @@ def run_sleep_cycle(
             evolve_memory=cfg.get("evolve_memory", True),
             night=night,
         )
-    except CursorBackendError:
+    except (CursorBackendError, CopilotReplayError):
         _discard_unstaged_evidence(staging_dir_pre)
         raise
     # archive tonight's real (non-dream) tasks so future nights can recall them
@@ -969,7 +996,7 @@ def run_sleep_cycle(
                     evolve_skill=cfg.get("evolve_skill", True),
                     night=night,
                 )
-            except CursorBackendError:
+            except (CursorBackendError, CopilotReplayError):
                 _discard_unstaged_evidence(staging_dir_pre)
                 raise
             for raw_name in grouped:
@@ -1045,6 +1072,8 @@ def run_sleep_cycle(
                         "opencode_tool_replay": (
                             cfg.get("opencode_tool_replay", False) is True
                         ),
+                        "copilot_replay_profile_enabled": bool(cfg.get("copilot_replay_profile")),
+                        "copilot_replay_tools": cfg.get("copilot_replay_tools", []),
                         "gate_mode": cfg.get("gate_mode"),
                         "gate_no_regression": cfg.get("gate_no_regression", False),
                         "n_tasks": len(tasks),

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from typing import NamedTuple
@@ -62,6 +63,15 @@ _TOOL_SCHEMA = {
                    "description": "Transcript source (default: claude)."},
         "model": {"type": "string",
                   "description": "Backend-specific model override."},
+        "copilot_replay_profile": {
+            "type": "string", "minLength": 1,
+            "description": "For sleep_run/sleep_dry_run, local directory containing mcp-config.json; relative to project.",
+        },
+        "copilot_replay_tools": {
+            "type": "array", "minItems": 1, "uniqueItems": True,
+            "items": {"type": "string", "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]*$"},
+            "description": "Exact Copilot tool names auto-approved for replay only; required with a profile. No wildcards.",
+        },
         "tasks_file": {"type": "string",
                        "description": "Path to reviewed TaskRecord JSON (skips harvest)."},
         "target_skill_path": {"type": "string",
@@ -108,7 +118,7 @@ _TOOL_SCHEMA = {
 
 _STRING_ARGS = {
     "project", "backend", "scope", "source", "model", "tasks_file",
-    "target_skill_path", "staging",
+    "target_skill_path", "staging", "copilot_replay_profile",
 }
 _BOOLEAN_ARGS = {"all_skills", "legacy", "progress", "auto_adopt", "json"}
 _INTEGER_BOUNDS = {
@@ -121,6 +131,7 @@ _INTEGER_BOUNDS = {
 }
 _ADOPT_ONLY_ARGS = {"staging", "skills", "all_skills", "legacy"}
 _SCHEDULE_ONLY_ARGS = {"hour", "minute"}
+_REPLAY_ONLY_ARGS = {"copilot_replay_profile", "copilot_replay_tools"}
 
 
 class EngineResult(NamedTuple):
@@ -151,9 +162,22 @@ def _validate_tool_arguments(action: str, args: object) -> dict:
         raise ValueError("staging/skills/all_skills/legacy are valid only for sleep_adopt")
     if action != "schedule" and set(args) & _SCHEDULE_ONLY_ARGS:
         raise ValueError("hour/minute are valid only for sleep_schedule")
+    if action not in {"run", "dry-run"} and set(args) & _REPLAY_ONLY_ARGS:
+        raise ValueError("copilot_replay_profile/tools are valid only for sleep_run/sleep_dry_run")
 
     for key in _STRING_ARGS & set(args):
         _validate_text(key, args[key])
+    if "copilot_replay_profile" in args and not args["copilot_replay_profile"].strip():
+        raise ValueError("copilot_replay_profile must be non-empty")
+    if "copilot_replay_tools" in args:
+        tools = args["copilot_replay_tools"]
+        if type(tools) is not list or not tools:
+            raise ValueError("copilot_replay_tools must be a non-empty array of exact tool names")
+        pattern = _TOOL_SCHEMA["properties"]["copilot_replay_tools"]["items"]["pattern"]
+        if any(type(tool) is not str or re.fullmatch(pattern, tool) is None for tool in tools):
+            raise ValueError("copilot_replay_tools must contain exact tool names, not wildcards or selectors")
+        if len(set(tools)) != len(tools):
+            raise ValueError("copilot_replay_tools entries must be unique")
     for key in _BOOLEAN_ARGS & set(args):
         if type(args[key]) is not bool:
             raise ValueError(f"{key} must be a boolean")
@@ -227,6 +251,10 @@ def _run_engine(action: str, args: object) -> EngineResult:
         val = args.get(key)
         if val:
             cmd += [flag, str(val)]
+    if "copilot_replay_profile" in args:
+        cmd.append("--copilot-replay-profile=" + args["copilot_replay_profile"])
+    for tool in args.get("copilot_replay_tools", []):
+        cmd += ["--copilot-replay-tool", tool]
     # Integer-valued flags
     for flag, key in [
         ("--max-sessions", "max_sessions"), ("--max-tasks", "max_tasks"),

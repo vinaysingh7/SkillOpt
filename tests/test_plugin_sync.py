@@ -117,24 +117,33 @@ class TestPluginParity(unittest.TestCase):
         self.assertIn('pi_path=""', text)
         self.assertIn('cursor_path=""', text)
         self.assertIn('opencode_path=""', text)
+        self.assertIn('copilot_replay_profile=""', text)
+        self.assertIn('copilot_replay_tools=None', text)
         self.assertIn('azure_endpoint=""', text)
         self.assertIn('project_dir=""', text)
         self.assertIn("claude_path=claude_path", text)
         self.assertIn("pi_path=pi_path", text)
         self.assertIn("cursor_path=cursor_path", text)
         self.assertIn("opencode_path=opencode_path", text)
+        self.assertIn("copilot_replay_profile=copilot_replay_profile", text)
+        self.assertIn("copilot_replay_tools=copilot_replay_tools", text)
         self.assertIn("azure_endpoint=azure_endpoint", text)
         self.assertIn("project_dir=project_dir", text)
         self.assertNotIn("**kwargs", text)
 
         script = f"""
 import inspect
+import json
 import runpy
 import sys
+import tempfile
+from pathlib import Path
 sys.path.insert(0, {os.path.dirname(OPENCLAW_RUNNER)!r})
 runner = runpy.run_path({OPENCLAW_RUNNER!r}, run_name="openclaw_runner_test")
 wrapped_get_backend = runner["get_backend"]
 assert inspect.signature(wrapped_get_backend).parameters["opencode_tool_replay"].default is False
+assert inspect.signature(wrapped_get_backend).parameters["copilot_replay_profile"].default == ""
+assert inspect.signature(wrapped_get_backend).parameters["copilot_replay_tools"].default is None
 
 enabled = wrapped_get_backend(
     "opencode",
@@ -158,6 +167,16 @@ backend = build_backend(
     azure_endpoint="https://unused.invalid",
 )
 assert backend.name == "mock", backend.name
+
+with tempfile.TemporaryDirectory() as profile:
+    Path(profile, "mcp-config.json").write_text(
+        json.dumps(dict(mcpServers=dict(catalog=dict(command="unused-server")))), encoding="utf-8"
+    )
+    replay = wrapped_get_backend(
+        "copilot", copilot_replay_profile=profile, copilot_replay_tools=["catalog-get_item"]
+    )
+    assert replay.replay_profile.directory == profile
+    assert replay.replay_profile.tools == ("catalog-get_item",)
 """
         result = subprocess.run(
             [sys.executable, "-c", script],

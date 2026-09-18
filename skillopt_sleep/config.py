@@ -61,6 +61,8 @@ DEFAULTS: Dict[str, Any] = {
     "cursor_path": "",            # "" => auto-detect the Cursor Agent CLI
     "opencode_path": "",          # "" => SKILLOPT_SLEEP_OPENCODE_PATH, then `opencode` on PATH/PATHEXT
     "opencode_tool_replay": False,  # explicit opt-in for OpenCode tool-aware replay
+    "copilot_replay_profile": "",  # opt-in local directory containing mcp-config.json
+    "copilot_replay_tools": [],    # exact Copilot tool names; required with a replay profile
     "edit_budget": 4,             # textual learning rate (max edits/night)
     "preferences": "",            # free-text house rules injected into reflect as a prior
     "gate_metric": "mixed",       # hard | soft | mixed (mixed best for tiny holdouts)

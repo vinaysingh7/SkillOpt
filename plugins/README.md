@@ -153,6 +153,7 @@ Common implemented flags include:
 | `--opencode-path PATH` | `SKILLOPT_SLEEP_OPENCODE_PATH`, then `opencode` on `PATH`/`PATHEXT` | select the OpenCode CLI executable |
 | `--opencode-db PATH` | `OPENCODE_DB`, `%LOCALAPPDATA%`/`%APPDATA%` (Windows), or `${XDG_DATA_HOME:-~/.local/share}/opencode/opencode.db` | select the OpenCode SQLite history database |
 | `--opencode-tool-replay` | off | enable OpenCode tool-aware replay for `tool_called` checks in rule judges |
+| `--copilot-replay-profile PATH` / `--copilot-replay-tool NAME` | off | `run`/`dry-run` only: select a local Copilot MCP profile and repeatable exact replay tool names; see the [safety contract](../docs/reference/cli.md#copilot-replay-mcp-profile) |
 | `--project PATH` | current directory | select the project and invoked harvest scope |
 | `--scope invoked\|all` | `invoked` | limit transcript harvesting |
 | `--target-skill-path PATH` | managed skill | select a specific `SKILL.md` to stage/adopt |

@@ -169,6 +169,8 @@ Common options for the nightly actions include:
 | `--opencode-path PATH` | Path to the installed OpenCode CLI |
 | `--opencode-db PATH` | Path to the OpenCode SQLite history database |
 | `--opencode-tool-replay` | Enable OpenCode tool-aware replay for `tool_called` checks in rule judges |
+| `--copilot-replay-profile PATH` | `run`/`dry-run` only: opt into a local directory containing `mcp-config.json` |
+| `--copilot-replay-tool NAME` | `run`/`dry-run` only: exact Copilot tool name to expose and auto-approve during replay; repeatable, required with a profile |
 | `--preferences TEXT` | House rules supplied to reflection |
 | `--lookback-hours N` | Initial transcript lookback; `0` scans all history |
 | `--max-sessions N` / `--max-tasks N` | Bound the harvested workload |
@@ -220,6 +222,108 @@ The managed `schedule` command does not persist `--source` or
 `"transcript_source": "copilot"` and, when needed,
 `"vscode_workspace_storage": "/absolute/path/to/workspaceStorage"` in
 `~/.skillopt-sleep/config.json`.
+
+### Copilot replay MCP profile
+
+Registering SkillOpt as an MCP server does **not** forward the caller's MCP
+definitions into replay. Copilot calls normally use a clean temporary working
+directory and an isolated `COPILOT_HOME`, with built-in MCP servers and custom
+instructions disabled.
+
+For tasks that need real MCP tools, explicitly select a **local, dedicated
+profile directory** and an **exact tool allowlist**. For example, keep a
+`replay-profile` directory outside version control with this illustrative
+`mcp-config.json` (replace the example command with your installed server):
+
+```json
+{
+  "mcpServers": {
+    "catalog": {
+      "command": "example-catalog-mcp",
+      "args": ["--read-only"],
+      "tools": ["get_item", "list_items"]
+    }
+  }
+}
+```
+
+Use commands on `PATH` or absolute command/argument paths: MCP startup does not
+run from the project or profile directory. Keep authentication in your local
+credential setup or environment; SkillOpt does not copy credentials or create
+the profile. Never commit profile contents or authentication material.
+
+Persist the selection in `~/.skillopt-sleep/config.json`:
+
+```json
+{
+  "backend": "copilot",
+  "copilot_replay_profile": "replay-profile",
+  "copilot_replay_tools": ["catalog-get_item", "catalog-list_items"],
+  "auto_adopt": false
+}
+```
+
+Both settings default to off (`""` and `[]`). Paths expand `~`; relative paths
+resolve against the invoked project, not the config file. Per-run CLI options
+override the corresponding persisted field; a provided tool list **replaces**,
+rather than extends, the saved list:
+
+```bash
+python -m skillopt_sleep dry-run --backend copilot \
+  --copilot-replay-profile replay-profile \
+  --copilot-replay-tool catalog-get_item \
+  --copilot-replay-tool catalog-list_items
+```
+
+The Copilot MCP shim exposes the same `copilot_replay_profile` string and
+`copilot_replay_tools` array on `sleep_run` and `sleep_dry_run`. Other MCP tools
+and CLI actions reject these per-run options rather than silently dropping them.
+Scheduled runs can use persisted settings; the scheduler does not add these
+flags to its command line.
+
+**Execution contract.** The profile must exist and contain readable, well-formed
+UTF-8 JSON with a non-empty `mcpServers` object, valid server definitions, and a
+non-empty array of unique exact tool names. Names are case-sensitive, using
+letters, digits, underscores, dots, and hyphens (no leading hyphen). Wildcards,
+permission selectors, whitespace, and comma-separated entries are rejected.
+Use the qualified names exposed by your Copilot CLI, not server-wide permission
+selectors. Validation is local: it does not connect to servers to verify tool
+availability, authentication, or read-only behavior.
+
+Only replay attempts receive the selected profile and tools. Copilot mining,
+judging, and reflection calls use fresh empty homes with an explicitly empty
+`--available-tools` set: **no shell tools, replay MCPs, or inherited legacy tool
+overrides**. This applies to both single-backend and optimizer/target-split
+configurations; the target must be Copilot. Other optimizer backends keep their
+own existing execution controls. Model selection is unchanged. Replay keeps the temporary cwd,
+`--disable-builtin-mcps`, and `--no-custom-instructions`, and never adds shell or
+filesystem tools implicitly. Rule-judge `tool_called` checks must name an
+allowlisted tool; profile mode counts actual JSONL `tool.execution_start`
+events rather than fabricated shell shims or the model's self-reports.
+
+`SKILLOPT_SLEEP_COPILOT_FULL_ENV` must be unset or `0` in profile mode. The
+explicit settings replace inherited `SKILLOPT_SLEEP_COPILOT_HOME` and
+`COPILOT_AVAILABLE_TOOLS`; these legacy overrides and `COPILOT_ALLOW_ALL` are
+removed from profile-mode child environments. Invalid or unreadable profiles,
+full-environment conflicts, failed processes, and empty answers fail the cycle,
+without a personal-home fallback. Profiles are checked again before each spawn.
+When no profile is selected, the existing environment-based behavior is unchanged.
+
+**Safety limits.** Copilot still uses `--allow-all-tools` to auto-approve the
+tools selected by `--available-tools`. This allowlist is **not an OS sandbox**
+and does not make arbitrary tools read-only. Choose genuinely read-only tools
+and trusted MCP servers for read-only evaluation; a selected tool can have
+external side effects, including during `dry-run` and repeated replay. All
+servers in the chosen profile may start, even when some of their tools are not
+selected, so keep the profile minimal and omit SkillOpt itself to avoid recursive
+startup. Profiles and servers can use the caller's credentials and permissions.
+Staging/adoption controls do not prevent tool-side effects; auto-adoption remains
+off unless separately enabled.
+
+Copilot can spill large MCP results to local temporary files. An MCP-only
+allowlist cannot read those files unless it explicitly includes suitable local
+read tooling. Prefer bounded MCP responses or explicitly select the necessary
+read tool; SkillOpt does not broaden the allowlist to handle overflow.
 
 ### Pi source and backend
 

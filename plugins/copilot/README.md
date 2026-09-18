@@ -77,12 +77,53 @@ tasks to the selected provider. Outbound prompts are not currently guaranteed
 to be secret-free; review sensitive data and provider policy first. See the
 [shared data-boundary guidance](../README.md#data-boundary).
 
-For speed, the `copilot` backend runs each call against an isolated
+By default, the `copilot` backend runs each call against an isolated
 `COPILOT_HOME` with built-in MCP servers and custom instructions disabled, so
 your user MCP servers (including this project's own) are not spawned per call
 (~5x faster). Override with `SKILLOPT_SLEEP_COPILOT_HOME=<dir>`, pick a model
 with `SKILLOPT_SLEEP_COPILOT_MODEL`, or set `SKILLOPT_SLEEP_COPILOT_FULL_ENV=1`
 to use your real Copilot environment instead.
+
+## Opt-in replay MCP profile
+
+Connecting this server does not forward your personal or workspace MCP
+definitions to the child Copilot calls. For replay tasks that need real tools,
+select a dedicated local directory containing `mcp-config.json` and a non-empty
+array of **exact, case-sensitive Copilot tool names**:
+
+```json
+{
+  "backend": "copilot",
+  "copilot_replay_profile": "replay-profile",
+  "copilot_replay_tools": ["catalog-get_item", "catalog-list_items"],
+  "json": true
+}
+```
+
+Pass these arguments to `sleep_dry_run` or `sleep_run`. Paths are relative to the
+invoked project unless absolute; `~` is expanded. You can instead persist the
+two settings in `~/.skillopt-sleep/config.json`, or use CLI
+`--copilot-replay-profile PATH` and repeated `--copilot-replay-tool NAME` flags.
+Per-run values replace the corresponding saved values. Other tools reject these
+per-run fields.
+
+Replay retains a clean temporary cwd, disabled built-in MCPs/custom
+instructions, and only the exact selected tools. Copilot mining/judging/reflection
+calls use empty homes and an explicitly empty tool set, with no shell or MCP tools.
+Explicit profile mode ignores inherited legacy home/tool overrides and rejects
+`SKILLOPT_SLEEP_COPILOT_FULL_ENV=1`; invalid configuration never falls back to
+your personal home. With no profile selected, legacy environment behavior is
+unchanged.
+
+**The CLI auto-approves selected tools; this is not an OS sandbox or a read-only
+guarantee.** Use read-only tools and trusted servers for read-only evaluation.
+Even `sleep_dry_run` can make real MCP calls; it only suppresses staging/adoption.
+No shell or filesystem tools are added implicitly, including when large MCP
+responses overflow into local files. Authentication and profiles remain local;
+do not commit them. Auto-adoption remains off unless separately enabled.
+
+See the [configuration examples and full safety contract](../../docs/reference/cli.md#copilot-replay-mcp-profile),
+including server validation, legacy override handling, and overflow-file limits.
 
 ## Verify the server directly (no Copilot needed)
 

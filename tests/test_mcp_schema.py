@@ -38,6 +38,7 @@ class TestMcpSchema(unittest.TestCase):
             "all_skills", "legacy", "progress",
             "max_sessions", "max_tasks", "lookback_hours",
             "auto_adopt", "json", "edit_budget",
+            "copilot_replay_profile", "copilot_replay_tools",
         }
         schema_props = set(mcp_server._TOOL_SCHEMA["properties"].keys())
         missing = required_params - schema_props
@@ -107,8 +108,64 @@ class TestMcpSchema(unittest.TestCase):
 
         run.assert_not_called()
 
+    def test_replay_profile_and_repeated_exact_tools_reach_cli(self):
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
+        arguments = {
+            "copilot_replay_profile": "local profile",
+            "copilot_replay_tools": ["catalog-get_item", "catalog-list_items"],
+        }
+        for action in ("run", "dry-run"):
+            with self.subTest(action=action), mock.patch.object(
+                mcp_server.subprocess, "run", return_value=completed
+            ) as run:
+                result = mcp_server._run_engine(action, arguments)
+                command = run.call_args.args[0]
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(command[-5:], [
+                    "--copilot-replay-profile=local profile",
+                    "--copilot-replay-tool", "catalog-get_item",
+                    "--copilot-replay-tool", "catalog-list_items",
+                ])
+                self.assertNotIn("--auto-adopt", command)
+                self.assertNotIn("shell", run.call_args.kwargs)
+
+    def test_replay_schema_uses_an_exact_nonempty_array(self):
+        props = mcp_server._TOOL_SCHEMA["properties"]
+        self.assertEqual(props["copilot_replay_profile"]["type"], "string")
+        self.assertEqual(props["copilot_replay_tools"]["type"], "array")
+        self.assertEqual(props["copilot_replay_tools"]["minItems"], 1)
+        self.assertTrue(props["copilot_replay_tools"]["uniqueItems"])
+
 
 class TestMcpRuntimeValidation(unittest.TestCase):
+    def test_invalid_replay_arguments_never_start_the_engine(self):
+        arguments = [
+            {"copilot_replay_profile": 1},
+            {"copilot_replay_profile": " "},
+            {"copilot_replay_profile": "profile\n"},
+        ]
+        arguments += [
+            {"copilot_replay_tools": value} for value in (
+                [], None, False, "catalog-get_item,catalog-list_items",
+                ["*"], ["catalog-*"], ["catalog(get_item)"], ["bash,write"],
+                ["--allow-all"], [1], ["tool\n"], ["same", "same"],
+            )
+        ]
+        for args in arguments:
+            with self.subTest(arguments=args), mock.patch.object(mcp_server.subprocess, "run") as run:
+                response = mcp_server.handle(_call("sleep_run", args))
+                self.assertEqual(response["error"]["code"], -32602)
+                self.assertIn("copilot_replay", response["error"]["message"])
+                run.assert_not_called()
+
+    def test_replay_options_are_not_silently_dropped_by_non_replay_tools(self):
+        for name in ("sleep_status", "sleep_adopt", "sleep_harvest", "sleep_schedule", "sleep_unschedule"):
+            with self.subTest(name=name), mock.patch.object(mcp_server.subprocess, "run") as run:
+                response = mcp_server.handle(_call(name, {"copilot_replay_profile": "profile"}))
+                self.assertEqual(response["error"]["code"], -32602)
+                self.assertIn("only for sleep_run/sleep_dry_run", response["error"]["message"])
+                run.assert_not_called()
+
     def test_malformed_request_envelopes_return_json_rpc_errors(self):
         cases = (
             ([], "request must be a JSON object"),
@@ -190,7 +247,7 @@ class TestMcpRuntimeValidation(unittest.TestCase):
 
     def test_every_string_boolean_and_integer_contract_is_exact_and_bounded(self):
         for key in mcp_server._STRING_ARGS:
-            action = "adopt" if key == "staging" else "status"
+            action = "adopt" if key == "staging" else "run" if key == "copilot_replay_profile" else "status"
             with self.subTest(kind="string", key=key), self.assertRaisesRegex(
                 ValueError, f"{key} must be a string"
             ):

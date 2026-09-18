@@ -15,6 +15,7 @@ from typing import Callable, Dict, List, Optional, Sequence
 
 from skillopt_sleep.backend import Backend, CursorBackendError
 from skillopt_sleep.consolidate import ConsolidationResult, consolidate
+from skillopt_sleep.copilot_replay import CopilotReplayError
 from skillopt_sleep.handoff_backend import PendingCalls
 from skillopt_sleep.types import SkillGroupReport, TaskRecord
 
@@ -74,8 +75,8 @@ def consolidate_groups(
     runs evolve skills only, so no group can rewrite another group's memory.
     ``group_kwargs_fn`` can add group-scoped inputs such as recalled history;
     its ordinary failures are isolated to that group. ``PendingCalls`` and
-    ``CursorBackendError`` from either the factory or consolidator propagate as
-    cycle-level pause/fail-closed control flow rather than becoming report rows.
+    backend boundary errors from either the factory or consolidator propagate
+    as cycle-level pause/fail-closed control flow rather than becoming report rows.
     """
     # This wrapper's contract is stricter than consolidate(): shared memory is
     # always read-only.  Override a caller-supplied value instead of passing a
@@ -111,10 +112,10 @@ def consolidate_groups(
                 backend, list(group.tasks), group.skill, memory,
                 **group_kwargs,
             )
-        except (PendingCalls, CursorBackendError):
+        except (PendingCalls, CursorBackendError, CopilotReplayError):
             # These exceptions are cycle-level control flow, not isolated
             # evidence about one group. Swallowing them can advance/save an
-            # incomplete handoff night or weaken Cursor's fail-closed path.
+            # incomplete night or weaken a backend's fail-closed path.
             raise
         except Exception as exc:  # one group's failure must not abort the night
             out[name] = GroupConsolidation(

@@ -149,6 +149,11 @@ local history, while `--backend copilot` uses the separately installed and
 authenticated GitHub Copilot CLI for mining, replay, judging, and reflection.
 Inspect harvested tasks before using a real backend on sensitive projects.
 
+Replay does not inherit the caller's MCP definitions. To opt into a dedicated
+local profile and exact replay tool allowlist, use `copilot_replay_profile` and
+`copilot_replay_tools`; see the [configuration and safety contract](../reference/cli.md#copilot-replay-mcp-profile).
+Selected tools are auto-approved, not automatically read-only, even in `dry-run`.
+
 The managed scheduler does not preserve `--source` or
 `--vscode-workspace-storage`. Before scheduling this source, put
 `"transcript_source": "copilot"` and, for a nonstandard root,

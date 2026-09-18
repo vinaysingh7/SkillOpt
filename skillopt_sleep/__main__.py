@@ -18,6 +18,8 @@ Common flags:
     --source claude|codex|copilot|copilot_cli|cursor|pi|opencode|auto
     --vscode-workspace-storage PATH
     --copilot-cli-session-store PATH
+    --copilot-replay-profile PATH  run/dry-run: local Copilot MCP profile
+    --copilot-replay-tool NAME     run/dry-run: exact allowed tool (repeatable)
     --opencode-db PATH
     --model NAME
     --lookback-hours N
@@ -34,6 +36,7 @@ from typing import Any, Dict
 
 from skillopt_sleep.backend import CursorBackendError
 from skillopt_sleep.config import load_config
+from skillopt_sleep.copilot_replay import CopilotReplayError, resolve_replay_profile
 from skillopt_sleep.cycle import _one_line_display_text, run_sleep_cycle
 from skillopt_sleep.harvest_sources import harvest_for_config
 from skillopt_sleep.mine import mine
@@ -149,6 +152,17 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--json", action="store_true")
 
 
+def _add_copilot_replay(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--copilot-replay-profile", default=None,
+        help="opt-in local Copilot home containing mcp-config.json (relative to --project)",
+    )
+    p.add_argument(
+        "--copilot-replay-tool", dest="copilot_replay_tools", action="append", default=None,
+        help="exact Copilot tool name to auto-approve during replay only (repeatable; no wildcards)",
+    )
+
+
 def _cfg_from_args(args, task_meta: Dict[str, Any] | None = None) -> Any:
     overrides: Dict[str, Any] = {}
     if args.project:
@@ -170,6 +184,10 @@ def _cfg_from_args(args, task_meta: Dict[str, Any] | None = None) -> Any:
         overrides["opencode_path"] = os.path.abspath(os.path.expanduser(args.opencode_path))
     if getattr(args, "opencode_tool_replay", False):
         overrides["opencode_tool_replay"] = True
+    if getattr(args, "copilot_replay_profile", None) is not None:
+        overrides["copilot_replay_profile"] = args.copilot_replay_profile
+    if getattr(args, "copilot_replay_tools", None) is not None:
+        overrides["copilot_replay_tools"] = args.copilot_replay_tools
     if getattr(args, "claude_home", ""):
         overrides["claude_home"] = os.path.abspath(args.claude_home)
     if getattr(args, "codex_home", ""):
@@ -251,7 +269,15 @@ def cmd_run(args, dry: bool = False) -> int:
             )
             return 2
     try:
+        if getattr(args, "copilot_replay_profile", None) == "":
+            raise CopilotReplayError("--copilot-replay-profile must name a non-empty local directory.")
         if cfg.get("backend", "mock") == "handoff":
+            if resolve_replay_profile(
+                cfg.get("copilot_replay_profile", ""),
+                cfg.get("copilot_replay_tools"),
+                project_dir=cfg.get("invoked_project", ""),
+            ) is not None:
+                raise CopilotReplayError("copilot_replay_profile requires a Copilot replay/target backend.")
             return _run_handoff(
                 cfg,
                 args,
@@ -260,7 +286,7 @@ def cmd_run(args, dry: bool = False) -> int:
                 dry=dry,
             )
         outcome = run_sleep_cycle(cfg, seed_tasks=tasks, dry_run=dry)
-    except CursorBackendError as exc:
+    except (CursorBackendError, CopilotReplayError) as exc:
         _print_run_failure(args, "backend_failed", exc)
         return 1
     except StagingError as exc:
@@ -853,8 +879,10 @@ def main(argv=None) -> int:
 
     p_run = sub.add_parser("run", help="run a full sleep cycle")
     _add_common(p_run)
+    _add_copilot_replay(p_run)
     p_dry = sub.add_parser("dry-run", help="harvest+mine+replay, report only")
     _add_common(p_dry)
+    _add_copilot_replay(p_dry)
     p_status = sub.add_parser("status", help="show state + latest proposal")
     _add_common(p_status)
     p_adopt = sub.add_parser("adopt", help="apply latest staged proposal")

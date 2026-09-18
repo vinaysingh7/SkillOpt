@@ -28,8 +28,9 @@ import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
+from skillopt_sleep.copilot_replay import CopilotReplayError, resolve_replay_profile
 from skillopt_sleep.types import EditRecord, ReplayResult, TaskRecord
 
 # On Windows, console-attached children (cmd.exe shims, python) allocate a
@@ -348,6 +349,9 @@ class CliBackend(Backend):
     def _call(self, prompt: str, *, max_tokens: int = 1024) -> str:
         raise NotImplementedError
 
+    def _attempt_call(self, prompt: str, *, max_tokens: int = 1024) -> str:
+        return self._call(prompt, max_tokens=max_tokens)
+
     def _cached_call(self, key: str, prompt: str, *, max_tokens: int = 1024) -> str:
         kind = key.split(":", 1)[0]
         ev = getattr(self, "evidence", None)
@@ -358,7 +362,8 @@ class CliBackend(Backend):
                        phase=getattr(self, "evidence_phase", ""), backend=self.name,
                        model=self.model)
             return self._cache[key]
-        out = self._call(prompt, max_tokens=max_tokens)
+        call = self._attempt_call if kind == "attempt" else self._call
+        out = call(prompt, max_tokens=max_tokens)
         self._tokens += len(prompt) // 4 + len(out) // 4
         self._cache[key] = out
         if ev is not None:
@@ -376,6 +381,13 @@ class CliBackend(Backend):
         # K dream rollouts into one cached response (spread always 0), which
         # silently disables contrastive reflection. sample_id=0 keeps the old
         # key format so gate re-scoring still benefits from the cache.
+        prompt = self._attempt_prompt(task, skill, memory)
+        salt = f"s{sample_id}:" if sample_id else ""
+        key = "attempt:" + salt + skill_hash(prompt)
+        return self._cached_call(key, prompt, max_tokens=512)
+
+    @staticmethod
+    def _attempt_prompt(task: TaskRecord, skill: str, memory: str) -> str:
         if task.system:
             # Benchmark carries its own (research-repo) rollout system prompt.
             # Use it verbatim with a neutral skill/memory section — this both
@@ -388,25 +400,18 @@ class CliBackend(Backend):
             if "{skill_section}" not in task.system and skill_section:
                 system = skill_section + system
             body = task.intent + ("\n\n" + task.context_excerpt if task.context_excerpt else "")
-            prompt = f"{system}{mem_section}\n{body}"
-            salt = f"s{sample_id}:" if sample_id else ""
-            key = "attempt:" + salt + skill_hash(prompt)
-            return self._cached_call(key, prompt, max_tokens=512)
+            return f"{system}{mem_section}\n{body}"
         # generic path (mined daily-case tasks): neutral, content-filter-safe
         # wording. Apply the skill/memory as guidance, not as adversarial
         # "OVERRIDE everything" directives. Template lives in the prompt
         # registry so the dashboard can display/override it live.
         from skillopt_sleep import prompts as prompt_registry
-        prompt = prompt_registry.render("attempt", {
+        return prompt_registry.render("attempt", {
             "__SKILL__": skill or "(none)",
             "__MEMORY__": memory or "(none)",
             "__INTENT__": task.intent,
             "__CONTEXT__": task.context_excerpt,
         })
-        # cache on (task, skill, memory) so identical hold-out re-scoring is free
-        salt = f"s{sample_id}:" if sample_id else ""
-        key = "attempt:" + salt + skill_hash(prompt)
-        return self._cached_call(key, prompt, max_tokens=512)
 
     def judge(self, task: TaskRecord, response: str) -> Tuple[float, float, str]:
         # real-benchmark correctness judge (searchqa/livemath/spreadsheet) — local
@@ -1764,21 +1769,29 @@ class CopilotCliBackend(CliBackend):
     slow recursive launch), and built-in MCP servers / custom instructions are
     disabled. Auth is read from the OS credential store / token env vars, which
     live outside ``COPILOT_HOME``, so isolation does not break authentication.
-    Set ``SKILLOPT_SLEEP_COPILOT_HOME`` to override the isolated home, or set it
-    empty / ``SKILLOPT_SLEEP_COPILOT_FULL_ENV=1`` to use the user's real
-    environment instead.
+    Legacy environment overrides remain supported when no replay profile is
+    selected. An explicit replay profile supplies MCP definitions and an exact
+    tool allowlist for attempts only; mining, judging, and reflection instead
+    use a fresh empty home and no tools, ignoring legacy overrides.
+    This is tool visibility/config isolation, not an OS sandbox.
     """
 
     name = "copilot"
 
-    def __init__(self, model: str = "", copilot_path: str = "", timeout: int = 240) -> None:
+    def __init__(
+        self, model: str = "", copilot_path: str = "", timeout: int = 240,
+        *, copilot_replay_profile: str = "", copilot_replay_tools: Optional[List[str]] = None,
+    ) -> None:
+        self.replay_profile = resolve_replay_profile(copilot_replay_profile, copilot_replay_tools)
         super().__init__(model=model or os.environ.get("SKILLOPT_SLEEP_COPILOT_MODEL", ""),
                          timeout=timeout)
         self.copilot_path = resolve_copilot_path(copilot_path)
         self.copilot_argv = resolve_copilot_argv(copilot_path)
         self.full_env = os.environ.get("SKILLOPT_SLEEP_COPILOT_FULL_ENV", "") == "1"
         # Stable isolated home so first-run setup is cached across calls.
-        if self.full_env:
+        if self.replay_profile is not None:
+            self.copilot_home = self.replay_profile.directory
+        elif self.full_env:
             self.copilot_home = ""
         else:
             self.copilot_home = os.environ.get("SKILLOPT_SLEEP_COPILOT_HOME") or os.path.join(
@@ -1789,7 +1802,10 @@ class CopilotCliBackend(CliBackend):
             except OSError:
                 self.copilot_home = ""
 
-    def _call(self, prompt: str, *, max_tokens: int = 1024) -> str:
+    def _attempt_call(self, prompt: str, *, max_tokens: int = 1024) -> str:
+        return self._call(prompt, max_tokens=max_tokens, replay=True)
+
+    def _call(self, prompt: str, *, max_tokens: int = 1024, replay: bool = False) -> str:
         # An empty response must never reach the caller. `judge()` scores "" as
         # a legitimate 0.0, so one dropped API call becomes an ordinary-looking
         # score -- observed as `gate_trial:skill` = 0.00 with the rationale "No
@@ -1797,19 +1813,48 @@ class CopilotCliBackend(CliBackend):
         # gate verdict on a single-task holdout. The judge rated silence, not the
         # skill. Retry once, then fail loudly: aborting a cycle is recoverable, a
         # laundered infrastructure failure is not.
-        out = self._call_once(prompt, max_tokens=max_tokens)
+        out = self._call_once(prompt, max_tokens=max_tokens, replay=replay)
         if out.strip():
             return out
-        out = self._call_once(prompt, max_tokens=max_tokens)
+        out = self._call_once(prompt, max_tokens=max_tokens, replay=replay)
         if out.strip():
             return out
-        raise EmptyResponseError(
+        error = CopilotReplayError if self.replay_profile is not None else EmptyResponseError
+        raise error(
             f"{self.name} backend returned an empty response twice "
             f"(prompt {len(prompt)} chars). Refusing to score silence as 0.0."
         )
 
-    def _call_once(self, prompt: str, *, max_tokens: int = 1024) -> str:
-        clean_cwd = tempfile.mkdtemp(prefix="skillopt_sleep_copilot_")
+    def _call_once(self, prompt: str, *, max_tokens: int = 1024, replay: bool = False) -> str:
+        with tempfile.TemporaryDirectory(prefix="skillopt_sleep_copilot_", ignore_cleanup_errors=True) as clean_cwd:
+            raw = self._run_copilot(prompt, clean_cwd, replay=replay)
+        return self._parse_jsonl_response(raw)
+
+    def _run_copilot(self, prompt: str, cwd: str, *, replay: bool) -> str:
+        env = os.environ.copy()
+        home = self.copilot_home
+        available_tools = [os.environ.get("COPILOT_AVAILABLE_TOOLS", "bash")]
+        if self.replay_profile is not None:
+            # Recheck before every spawn: a removed/edited profile must not turn
+            # into a successful-looking run under the caller's personal home.
+            self.replay_profile.validate()
+            for key in (
+                "SKILLOPT_SLEEP_COPILOT_HOME", "SKILLOPT_SLEEP_COPILOT_FULL_ENV",
+                "COPILOT_AVAILABLE_TOOLS", "COPILOT_ALLOW_ALL",
+            ):
+                env.pop(key, None)
+            if replay:
+                home = self.replay_profile.directory
+                available_tools = [",".join(self.replay_profile.tools)]
+            else:
+                home = os.path.join(cwd, ".copilot")
+                try:
+                    os.mkdir(home)
+                except OSError as exc:
+                    raise CopilotReplayError("Cannot create an isolated Copilot home for optimizer calls.") from exc
+                available_tools = []
+        if home:
+            env["COPILOT_HOME"] = home
         cmd = [
             *self.copilot_argv, "-p", prompt,
             "--output-format", "json",
@@ -1821,75 +1866,86 @@ class CopilotCliBackend(CliBackend):
             # a separate axis: ``--available-tools`` restricts which tools the model
             # can see at all. Scoping happens there, so we keep both.
             "--allow-all-tools",
-            "--available-tools", os.environ.get("COPILOT_AVAILABLE_TOOLS", "bash"),
-            "-C", clean_cwd,
+            "--available-tools", *available_tools,
+            "-C", cwd,
         ]
-        if not self.full_env:
+        if self.replay_profile is not None or not self.full_env:
             # Drop unneeded startup work: no built-in (github) MCP server and no
             # AGENTS.md / custom-instruction loading. With an isolated home that
             # has no mcp-config.json, no user MCP servers spawn either.
             cmd += ["--disable-builtin-mcps", "--no-custom-instructions"]
         if self.model:
             cmd += ["--model", self.model]
-        env = os.environ.copy()
-        if self.copilot_home:
-            env["COPILOT_HOME"] = self.copilot_home
         try:
             proc = subprocess.run(
-                cmd, capture_output=True, creationflags=_NO_WINDOW, text=True, timeout=self.timeout, cwd=clean_cwd,
+                cmd, capture_output=True, creationflags=_NO_WINDOW, text=True, timeout=self.timeout, cwd=cwd,
                 encoding="utf-8", errors="replace", env=env,
             )
-        except Exception:
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            if self.replay_profile is not None:
+                raise CopilotReplayError(
+                    "Copilot replay invocation failed or timed out; check the CLI installation, "
+                    "authentication, and local profile. No fallback was attempted."
+                ) from exc
             return ""
-        finally:
-            try:
-                import shutil
-                shutil.rmtree(clean_cwd, ignore_errors=True)
-            except OSError:
-                pass
-        return self._parse_jsonl_response(proc.stdout or "")
+        if self.replay_profile is not None and proc.returncode != 0:
+            # Do not echo stderr: MCP errors may include authentication material.
+            raise CopilotReplayError(
+                f"Copilot replay invocation exited {proc.returncode}; check the CLI, authentication, "
+                "profile, and exact tool names. No fallback was attempted."
+            )
+        return proc.stdout or ""
 
     @staticmethod
-    def _parse_jsonl_response(raw: str) -> str:
-        """Concatenate assistant text from a Copilot JSONL event stream.
-
-        Behaviourally identical to ``skillopt.model.copilot_backend``'s
-        ``parse_copilot_jsonl``; vendored because this package keeps ZERO
-        dependency on the research package (see the module docstring of
-        ``skillopt_sleep.gate`` for the same arrangement). Keep the two in sync.
-
-        A malformed event must never take down the whole stream: the CLI emits
-        one JSON object per line, so a single bad line loses at most that line's
-        text while the surrounding ``assistant.message`` events still parse.
-        ``data`` is therefore type-checked rather than assumed to be an object.
-        A truthy non-dict (``"text"``, ``5``, a non-empty list) would otherwise
-        raise ``AttributeError`` from the field access, which no caller catches.
-
-        The exception list is deliberately wider than the research-package copy:
-        ``json.loads`` raises ``RecursionError`` rather than ``JSONDecodeError``
-        on a deeply nested payload.
-        """
-        parts: List[str] = []
+    def _jsonl_events(raw: str) -> Iterator[Dict[str, Any]]:
+        """Skip malformed events without losing the rest of the CLI stream."""
         for line in raw.splitlines():
-            line = line.strip()
-            if not line or not line.startswith("{"):
+            if not line.lstrip().startswith("{"):
                 continue
             try:
                 obj = json.loads(line)
             except (ValueError, RecursionError, TypeError):
                 continue
-            if not isinstance(obj, dict):
-                continue
+            if isinstance(obj, dict) and isinstance(obj.get("data"), dict):
+                yield obj
+
+    @staticmethod
+    def _parse_jsonl_response(raw: str) -> str:
+        """Concatenate assistant text, matching the research Copilot parser."""
+        parts: List[str] = []
+        for obj in CopilotCliBackend._jsonl_events(raw):
             if obj.get("type") == "assistant.message":
-                data = obj.get("data")
-                if not isinstance(data, dict):
-                    continue
-                content = data.get("content")
+                content = obj["data"].get("content")
                 if isinstance(content, str) and content:
                     parts.append(content)
         return "\n".join(parts).strip()
 
+    def _profile_attempt_with_tools(
+        self, task: TaskRecord, skill: str, memory: str, tools: List[str],
+    ) -> Tuple[str, List[str]]:
+        assert self.replay_profile is not None
+        if any(tool not in self.replay_profile.tools for tool in tools):
+            raise CopilotReplayError(
+                "tool_called checks must use exact names in copilot_replay_tools; "
+                "replay never adds synthetic tools or implicit shell access."
+            )
+        prompt = self._attempt_prompt(task, skill, memory)
+        with tempfile.TemporaryDirectory(prefix="skillopt_sleep_copilottools_", ignore_cleanup_errors=True) as work:
+            raw = self._run_copilot(prompt, work, replay=True)
+        response = self._parse_jsonl_response(raw)
+        if not response:
+            raise CopilotReplayError("Copilot tool replay returned no answer; refusing to score an empty response.")
+        self._tokens += len(prompt) // 4 + len(response) // 4
+        called = {
+            obj["data"]["toolName"] for obj in self._jsonl_events(raw)
+            if obj.get("type") == "tool.execution_start"
+            and isinstance(obj["data"].get("toolName"), str)
+        }
+        return response, [tool for tool in tools if tool in called]
+
     def attempt_with_tools(self, task, skill, memory, tools):
+        if self.replay_profile is not None:
+            return self._profile_attempt_with_tools(task, skill, memory, tools or [])
         # Expose REAL, callable tool shims in the working directory so the
         # gbrain quick-answerer judge (tool_called=search) is validated
         # honestly: we detect each call from the shim's log, not from a
@@ -1953,37 +2009,7 @@ class CopilotCliBackend(CliBackend):
                 f"# Task\n{task.intent}\n\n{task.context_excerpt}\n\n"
                 "Return ONLY the final answer text."
             )
-            cmd = [
-                *self.copilot_argv, "-p", prompt,
-                "--output-format", "json",
-                "--stream", "off",
-                "--no-color",
-                "--log-level", "none",
-                # ``--allow-all-tools`` is REQUIRED for non-interactive mode (it
-                # waives the approval prompt); it is the permission axis. Tool
-                # *visibility* is a separate axis: ``--available-tools`` restricts
-                # which tools the model can see at all. Scoping happens there, so
-                # we keep both.
-                "--allow-all-tools",
-                "--available-tools", os.environ.get("COPILOT_AVAILABLE_TOOLS", "bash"),
-                "-C", work,
-            ]
-            if not self.full_env:
-                cmd += ["--disable-builtin-mcps", "--no-custom-instructions"]
-            if self.model:
-                cmd += ["--model", self.model]
-            env = os.environ.copy()
-            if self.copilot_home:
-                env["COPILOT_HOME"] = self.copilot_home
-            resp = ""
-            try:
-                proc = subprocess.run(
-                    cmd, capture_output=True, creationflags=_NO_WINDOW, text=True, encoding="utf-8",
-                    errors="replace", timeout=self.timeout, cwd=work, env=env,
-                )
-                resp = self._parse_jsonl_response(proc.stdout or "")
-            except Exception:
-                resp = ""
+            resp = self._parse_jsonl_response(self._run_copilot(prompt, work, replay=True))
             self._tokens += len(prompt) // 4 + len(resp) // 4
             called: List[str] = []
             if os.path.exists(calllog):
@@ -2583,6 +2609,9 @@ class AzureResponsesBackend(AzureOpenAIBackend):
         return ""
 
 
+_COPILOT_ALIASES = {"copilot", "github_copilot", "copilot_cli", "gh_copilot"}
+
+
 def get_backend(
     name: str,
     *,
@@ -2593,10 +2622,17 @@ def get_backend(
     cursor_path: str = "",
     opencode_path: str = "",
     opencode_tool_replay: bool = False,
+    copilot_replay_profile: str = "",
+    copilot_replay_tools: Optional[List[str]] = None,
     azure_endpoint: str = "",
     project_dir: str = "",
 ) -> Backend:
     n = (name or "mock").strip().lower()
+    replay_profile = resolve_replay_profile(
+        copilot_replay_profile, copilot_replay_tools, project_dir=project_dir,
+    )
+    if replay_profile is not None and n not in _COPILOT_ALIASES:
+        raise CopilotReplayError("copilot_replay_profile requires a Copilot replay/target backend.")
     if n in {"pi", "pi_cli", "pi_coding_agent", "pi-coding-agent"}:
         return PiCliBackend(model=model, pi_path=pi_path or "pi")
     if n in {"claude", "anthropic", "claude_cli", "claude_code"}:
@@ -2608,8 +2644,12 @@ def get_backend(
     if n in {"azure-responses", "azure_responses", "aoai-responses", "responses"}:
         eps = [e.strip() for e in azure_endpoint.split(",") if e.strip()] or None
         return AzureResponsesBackend(deployment=model, endpoints=eps)
-    if n in {"copilot", "github_copilot", "copilot_cli", "gh_copilot"}:
-        return CopilotCliBackend(model=model)
+    if n in _COPILOT_ALIASES:
+        return CopilotCliBackend(
+            model=model,
+            copilot_replay_profile=replay_profile.directory if replay_profile else "",
+            copilot_replay_tools=list(replay_profile.tools) if replay_profile else None,
+        )
     if n in {"cursor", "cursor_agent", "cursor_cli"}:
         return CursorCliBackend(model=model, cursor_path=cursor_path)
     if n in {"opencode", "opencode_cli", "opencode-cli"}:
@@ -2641,6 +2681,8 @@ def build_backend(
     cursor_path: str = "",
     opencode_path: str = "",
     opencode_tool_replay: bool = False,
+    copilot_replay_profile: str = "",
+    copilot_replay_tools: Optional[List[str]] = None,
     azure_endpoint: str = "",
     preferences: str = "",
     project_dir: str = "",
@@ -2662,6 +2704,8 @@ def build_backend(
             cursor_path=cursor_path,
             opencode_path=opencode_path,
             opencode_tool_replay=opencode_tool_replay,
+            copilot_replay_profile=copilot_replay_profile,
+            copilot_replay_tools=copilot_replay_tools,
             azure_endpoint=azure_endpoint,
             project_dir=project_dir,
         )
@@ -2670,11 +2714,18 @@ def build_backend(
     tgt = get_backend(target_backend or backend, model=target_model or model,
                       codex_path=codex_path, pi_path=pi_path, cursor_path=cursor_path,
                       opencode_path=opencode_path, opencode_tool_replay=opencode_tool_replay,
+                      copilot_replay_profile=copilot_replay_profile,
+                      copilot_replay_tools=copilot_replay_tools,
                       azure_endpoint=azure_endpoint,
                       project_dir=project_dir)
+    # A Copilot optimizer must also know profile mode is selected so its
+    # non-attempt calls ignore legacy home/tool overrides and use an empty home.
+    copilot_optimizer = (optimizer_backend or backend).strip().lower() in _COPILOT_ALIASES
     opt = get_backend(optimizer_backend or backend, model=optimizer_model or model,
                       codex_path=codex_path, pi_path=pi_path, cursor_path=cursor_path,
                       opencode_path=opencode_path, opencode_tool_replay=opencode_tool_replay,
+                      copilot_replay_profile=copilot_replay_profile if copilot_optimizer else "",
+                      copilot_replay_tools=copilot_replay_tools if copilot_optimizer else None,
                       azure_endpoint=azure_endpoint,
                       project_dir=project_dir)
     opt.preferences = preferences  # reflect runs on the optimizer

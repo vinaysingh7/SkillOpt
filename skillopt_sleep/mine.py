@@ -22,6 +22,7 @@ from dataclasses import replace
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from skillopt_sleep.backend import CursorBackendError
+from skillopt_sleep.copilot_replay import CopilotReplayError
 from skillopt_sleep.types import SessionDigest, TaskRecord
 
 
@@ -376,7 +377,7 @@ def mine(
     if llm_miner is not None:
         try:
             tasks = llm_miner(digests) or []
-        except CursorBackendError:
+        except (CursorBackendError, CopilotReplayError):
             raise
         except Exception:
             tasks = []
